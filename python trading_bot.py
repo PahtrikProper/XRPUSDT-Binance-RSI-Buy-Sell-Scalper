@@ -34,19 +34,24 @@ def fetch_data(symbol, timeframe='5m', limit=100):
     logger.debug(f"Fetched data for {symbol}: {df.head()}")
     return df
 
-def calculate_rsi(df, symbol, period=14):
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
+def calculate_rsi(df, period=14):
+    if not isinstance(period, int) or period <= 0:
+        raise ValueError("Period must be an integer greater than 0")
+    delta = df['close'].diff(1)
+    gain = (delta.where(delta > 0, 0)).fillna(0)
+    loss = (-delta.where(delta < 0, 0)).fillna(0)
+    avg_gain = gain.rolling(window=period, min_periods=1).mean()
+    avg_loss = loss.rolling(window=period, min_periods=1).mean()
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    df['rsi'] = rsi.rolling(window=14).mean()
-    logger.debug(f"Calculated RSI for {symbol}")
+    df['rsi'] = rsi
     return df
 
-def calculate_ema(df, symbol, period=3):
+def calculate_ema(df, period=3):
+    if not isinstance(period, int) or period <= 0:
+        raise ValueError("Period must be an integer greater than 0")
     df['ema'] = df['close'].ewm(span=period, adjust=False).mean()
-    logger.debug(f"Calculated EMA for {symbol}")
+    logger.debug(f"Calculated EMA")
     return df
 
 def ensure_notional_value(symbol, amount, price):
@@ -59,34 +64,62 @@ def ensure_notional_value(symbol, amount, price):
     return amount
 
 def check_buy_conditions(df, symbol):
-    last_rsi = df.iloc[-1]['rsi']
-    if last_rsi > 62.8:
-        balance = exchange.fetch_balance()
-        usdt_balance = balance['free']['USDT'] * 0.98
-        last_ema = df.iloc[-1]['ema']
-        price = adjust_price(symbol, last_ema)
-        amount = usdt_balance / price
-        adjusted_amount = adjust_amount(symbol, amount)
-        adjusted_amount = ensure_notional_value(symbol, adjusted_amount, price)
-        logger.debug(f"Buy conditions met for {symbol}, placing order")
-        return exchange.create_limit_buy_order(symbol, adjusted_amount, price)
+    # Define RSI range
+    rsi_lower_bound = 62
+    rsi_upper_bound = 69
+
+    # Get the last two RSI values to check for crossover
+    last_rsi = df.iloc[-2:]['rsi'].values
+
+    # Check for upward crossover into the range
+    if last_rsi[0] < rsi_lower_bound and rsi_lower_bound <= last_rsi[1] <= rsi_upper_bound:
+        try:
+            balance = exchange.fetch_balance()
+            usdt_balance = balance['free']['USDT'] * 0.98
+            last_price = df.iloc[-1]['close']
+            price = adjust_price(symbol, last_price)
+            amount = usdt_balance / price
+            adjusted_amount = adjust_amount(symbol, amount)
+            adjusted_amount = ensure_notional_value(symbol, adjusted_amount, price)
+            logger.debug(f"Buy signal detected for {symbol}, placing order")
+            return exchange.create_limit_buy_order(symbol, adjusted_amount, price)
+        except ccxt.InsufficientFunds as e:
+            logger.warning(f"Insufficient funds for buying {symbol}: {str(e)}")
+            return None
 
 def check_sell_conditions(df, symbol, amount):
+    # Define RSI range
+    rsi_lower_bound = 62
+    rsi_upper_bound = 69
+
+    # Check if the RSI is outside the range
     last_rsi = df.iloc[-1]['rsi']
-    if last_rsi >= 69.33 or last_rsi <= 62.8:
-        last_ema = df.iloc[-1]['ema']
-        price = adjust_price(symbol, last_ema)
-        adjusted_amount = adjust_amount(symbol, amount)
-        adjusted_amount = ensure_notional_value(symbol, adjusted_amount, price)
-        logger.debug(f"Sell conditions met for {symbol}, placing order")
-        return exchange.create_limit_sell_order(symbol, adjusted_amount, price)
+    if last_rsi < rsi_lower_bound or last_rsi > rsi_upper_bound:
+        try:
+            last_price = df.iloc[-1]['close']
+            price = adjust_price(symbol, last_price)
+            adjusted_amount = adjust_amount(symbol, amount)
+            adjusted_amount = ensure_notional_value(symbol, adjusted_amount, price)
+            logger.debug(f"Sell signal detected for {symbol}, placing order")
+            return exchange.create_limit_sell_order(symbol, adjusted_amount, price)
+        except ccxt.InsufficientFunds as e:
+            logger.warning(f"Insufficient funds for selling {symbol}: {str(e)}")
+            return None
+
+def cancel_pending_buy_orders(symbol):
+    # Fetch open orders for the symbol
+    open_orders = exchange.fetch_open_orders(symbol)
+    for order in open_orders:
+        if order['side'] == 'buy':
+            logger.debug(f"Cancelling pending buy order for {symbol}: {order['id']}")
+            exchange.cancel_order(order['id'], symbol)
 
 def main():
-    symbol = 'XRP/USDT'
+    symbol = 'BTC/USDT'
     while True:
         df = fetch_data(symbol)
-        df = calculate_rsi(df, symbol)
-        df = calculate_ema(df, symbol)
+        df = calculate_rsi(df)  # Corrected the call to calculate_rsi without the symbol argument
+        df = calculate_ema(df)  # Removed the symbol argument
         buy_order = check_buy_conditions(df, symbol)
         if buy_order:
             logger.info(f"Buy Order: {buy_order}")
