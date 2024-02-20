@@ -21,6 +21,20 @@ exchange = ccxt.binance({
 })
 logging.info("Exchange initialized.")
 
+symbol_info_cache = {}
+
+def get_symbol_info(symbol):
+    if symbol not in symbol_info_cache:
+        logging.info(f"Fetching trading pair info for {symbol}")
+        symbol_info_cache[symbol] = exchange.load_markets()[symbol]
+    return symbol_info_cache[symbol]
+
+def adjust_amount(symbol, amount):
+    symbol_info = get_symbol_info(symbol)
+    precision = symbol_info['precision']['amount']
+    adjusted_amount = round(amount, precision)
+    return max(adjusted_amount, symbol_info['limits']['amount']['min'])
+
 def retry(exceptions, tries=4, delay=3, backoff=2):
     def deco_retry(func):
         @functools.wraps(func)
@@ -97,9 +111,25 @@ def check_and_execute_sell_order_rsi(symbol, df, amount):
     logging.info("Checking sell conditions...")
     current_rsi = df.iloc[-1]['RSI_SMA']
     if current_rsi <= 62.8 or current_rsi >= 69.33:
-        logging.info("Sell conditions met. Executing sell order...")
-        order = exchange.create_market_sell_order(symbol, amount)
-        logging.info(f"Sell order placed: ID {order['id']} for {amount} {symbol} at market price")
+        logging.info("Sell conditions met. Adjusting amount and executing sell order...")
+        
+        # Fetch current market price
+        ticker = exchange.fetch_ticker(symbol)
+        current_price = ticker['last']
+        
+        # Adjust amount based on precision
+        adjusted_amount = adjust_amount(symbol, amount)
+        
+        # Calculate notional value
+        notional_value = adjusted_amount * current_price
+        min_notional = get_symbol_info(symbol)['limits']['cost']['min']
+        
+        if notional_value < min_notional:
+            logging.warning(f"Notional value {notional_value} is below the minimum required {min_notional}. Order not placed.")
+            return
+        
+        order = exchange.create_market_sell_order(symbol, adjusted_amount)
+        logging.info(f"Sell order placed: ID {order['id']} for {adjusted_amount} {symbol} at market price")
     else:
         logging.info("Sell conditions not met.")
 
