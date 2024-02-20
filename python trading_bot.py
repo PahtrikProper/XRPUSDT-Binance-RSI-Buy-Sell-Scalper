@@ -75,7 +75,7 @@ def calculate_rsi(df, period=14):
     return df
 
 def calculate_ema(df, period=3):
-    logging.info("Calculating EMA...")
+    logging.info(f"Calculating EMA_{period}...")
     df[f'EMA_{period}'] = df['Close'].ewm(span=period, adjust=False).mean()
     logging.info(f"EMA_{period} calculated.")
     return df
@@ -90,46 +90,38 @@ def print_balances():
 def check_and_execute_buy_order_rsi_ema(symbol, df):
     logging.info("Checking buy conditions...")
     current_rsi = df.iloc[-1]['RSI_SMA']
-    current_ema = df.iloc[-1]['EMA_3']
-    if current_rsi >= 62.8 and df.iloc[-1]['Close'] >= current_ema:
+    current_ema3 = df.iloc[-1]['EMA_3']
+    if current_rsi >= 62.8 and df.iloc[-1]['Close'] >= current_ema3:
         logging.info("Buy conditions met. Executing buy order...")
         balance = exchange.fetch_balance()
         usdt_balance = balance['total']['USDT']
-        order_value = usdt_balance * 0.98
-        if order_value < 10:
+        order_value = usdt_balance * 0.98  # Using 98% of USDT balance
+        if order_value < 10:  # Check if the order value is sufficient
             logging.warning("Insufficient USDT balance for placing a buy order.")
             return
-        order_amount = order_value / current_ema
-        order_amount = math.floor(order_amount * 10**5) / 10**5
+        order_amount = order_value / current_ema3  # Calculate the amount to buy based on EMA_3 price
+        order_amount = math.floor(order_amount * 10**5) / 10**5  # Adjusting the amount based on Binance's precision requirements
         order = exchange.create_market_buy_order(symbol, order_amount)
-        logging.info(f"Buy order placed: ID {order['id']} for {order_amount} {symbol} at EMA 3 price {current_ema}")
+        logging.info(f"Buy order placed: ID {order['id']} for {order_amount} {symbol} at market price.")
     else:
         logging.info("Buy conditions not met.")
 
 @retry((ccxt.NetworkError, ccxt.ExchangeError), tries=5, delay=2, backoff=2)
-def check_and_execute_sell_order_rsi(symbol, df, amount):
+def check_and_execute_sell_order_rsi_ema_2(symbol, df, amount):
     logging.info("Checking sell conditions...")
+    df = calculate_ema(df, 2)  # Ensure the dataframe has the latest EMA_2
     current_rsi = df.iloc[-1]['RSI_SMA']
+    current_ema2 = df.iloc[-1]['EMA_2']
+
     if current_rsi <= 62.8 or current_rsi >= 69.33:
-        logging.info("Sell conditions met. Adjusting amount and executing sell order...")
-        
-        # Fetch current market price
-        ticker = exchange.fetch_ticker(symbol)
-        current_price = ticker['last']
+        logging.info("Sell conditions met. Preparing to execute sell order at EMA_2 price...")
         
         # Adjust amount based on precision
         adjusted_amount = adjust_amount(symbol, amount)
         
-        # Calculate notional value
-        notional_value = adjusted_amount * current_price
-        min_notional = get_symbol_info(symbol)['limits']['cost']['min']
-        
-        if notional_value < min_notional:
-            logging.warning(f"Notional value {notional_value} is below the minimum required {min_notional}. Order not placed.")
-            return
-        
-        order = exchange.create_market_sell_order(symbol, adjusted_amount)
-        logging.info(f"Sell order placed: ID {order['id']} for {adjusted_amount} {symbol} at market price")
+        # Place a limit sell order at the EMA_2 price
+        order = exchange.create_limit_sell_order(symbol, adjusted_amount, current_ema2)
+        logging.info(f"Limit sell order placed: ID {order['id']} for {adjusted_amount} {symbol} at EMA_2 price {current_ema2}")
     else:
         logging.info("Sell conditions not met.")
 
@@ -140,9 +132,9 @@ def main():
     while True:
         df = fetch_data(symbol, candle_length)
         df = calculate_rsi(df)
-        df = calculate_ema(df, 3)
+        df = calculate_ema(df, 3)  # Ensure EMA_3 is calculated for the buy condition
         check_and_execute_buy_order_rsi_ema(symbol, df)
-        check_and_execute_sell_order_rsi(symbol, df, amount=0.1)
+        check_and_execute_sell_order_rsi_ema_2(symbol, df, amount=0.1)  # Updated to use EMA_2 for selling
         logging.info("Sleeping for 60 seconds before the next iteration.")
         time.sleep(60)
 
